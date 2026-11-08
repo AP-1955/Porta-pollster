@@ -10,6 +10,9 @@ from datetime import date
 from .models import POPULATION_WEIGHTS, Event, Poll, VoterBehavior
 
 
+EARLY_POLL_FLOOR = 0.25
+
+
 @dataclass
 class PollAverage:
     shares: dict[str, float]  # candidate -> share, undecided allocated, sums to 100
@@ -20,26 +23,38 @@ class PollAverage:
     n_polls: int
 
 
-def poll_weight(poll: Poll, as_of: date, half_life_days: float = 14.0) -> float:
+def poll_weight(
+    poll: Poll,
+    as_of: date,
+    half_life_days: float = 14.0,
+    election_date: date | None = None,
+    behavior: VoterBehavior | None = None,
+) -> float:
     age = max(0, (as_of - poll.end_date).days)
     recency = 0.5 ** (age / half_life_days)
     size = math.sqrt(min(poll.sample_size, 5000) / 600.0)
-    return recency * size * POPULATION_WEIGHTS[poll.population]
+    weight = recency * size * POPULATION_WEIGHTS[poll.population]
+    if behavior is not None and election_date is not None and not behavior.in_decision_window(poll.end_date, election_date):
+        # Before the final week, late deciders' answers are guesses they haven't
+        # thought about yet. Keep a floor: early leanings still carry some signal,
+        # and the average needs weight even if every voter is a late decider.
+        weight *= max(1.0 - behavior.independent_share, EARLY_POLL_FLOOR)
+    return weight
 
 
 def event_adjustment(poll: Poll, candidate: str, events: list[Event], election_date: date, behavior: VoterBehavior) -> float:
-    """How much of each event's effect in this poll will have faded (or still remain) by election day.
+    """Move a poll from what opinion was on its date to what it will be on election day.
 
-    A poll right after a scandal shows its full effect; by election day only the
-    remembered part is left, so we move the poll toward that.
+    Partisans: a poll right after a scandal shows its full effect; by election
+    day only the remembered part is left.
+    Independents: they ignore events until the final week, so an early event
+    never reaches them, and an event inside the final week hits them fully.
     """
     adj = 0.0
     for e in events:
-        if e.candidate != candidate or e.on > poll.end_date:
+        if e.candidate != candidate:
             continue
-        in_poll = behavior.memory_weight((poll.end_date - e.on).days)
-        on_election_day = behavior.memory_weight((election_date - e.on).days)
-        adj += e.shift * (on_election_day - in_poll)
+        adj += e.shift * (behavior.event_effect(e, election_date, election_date) - behavior.event_effect(e, poll.end_date, election_date))
     return adj
 
 
@@ -114,15 +129,15 @@ def average_polls(
             if c not in p.shares:
                 continue
             adjusted = p.shares[c] - house[p.pollster][c] + event_adjustment(p, c, events, election_date, behavior)
-            vals.append((adjusted, poll_weight(p, as_of, half_life_days)))
+            vals.append((adjusted, poll_weight(p, as_of, half_life_days, election_date, behavior)))
         raw[c] = max(0.0, _weighted_mean(vals))
 
-    undecided = _weighted_mean([(p.undecided, poll_weight(p, as_of, half_life_days)) for p in polls])
+    undecided = _weighted_mean([(p.undecided, poll_weight(p, as_of, half_life_days, election_date, behavior)) for p in polls])
     shares = allocate_undecided(raw, behavior.undecided_allocation)
 
     # Effective sample size of the weighted average: n such that p(1-p)/n
     # matches the variance of the weighted mean of independent polls.
-    weights = [poll_weight(p, as_of, half_life_days) for p in polls]
+    weights = [poll_weight(p, as_of, half_life_days, election_date, behavior) for p in polls]
     eff_n = sum(weights) ** 2 / max(sum(w * w / p.sample_size for w, p in zip(weights, polls)), 1e-12)
     return PollAverage(shares, raw, undecided, house, eff_n, len(polls))
 

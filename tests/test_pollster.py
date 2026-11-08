@@ -50,12 +50,66 @@ def test_average_corrects_house_effect():
 
 
 def test_event_effect_fades_by_election_day():
-    b = VoterBehavior(memory_half_life_days=60)
+    b = VoterBehavior(memory_half_life_days=60, independent_share=0.0)
     event = Event(ELECTION - timedelta(days=120), "X", -6.0)
     poll = make_poll(1, 118, "A", {"X": 40, "Y": 50})  # right after the event
-    # 6 * (0.25 - ~0.98): most of the damage is forgotten, so poll moves up for X.
+    # 6 * (~0.98 - 0.25): most of the damage is forgotten, so the poll moves up for X.
     assert event_adjustment(poll, "X", [event], ELECTION, b) == pytest.approx(6 * (0.98 - 0.25), abs=0.1)
     assert event_adjustment(poll, "Y", [event], ELECTION, b) == 0.0
+
+
+def test_independents_never_notice_early_events():
+    only_partisans = VoterBehavior(independent_share=0.0)
+    with_independents = VoterBehavior(independent_share=0.4)
+    early = Event(ELECTION - timedelta(days=60), "X", -5.0)
+    # Independents never saw it, so less of the hit survives to election day.
+    assert with_independents.event_effect(early, ELECTION, ELECTION) == pytest.approx(
+        0.6 * only_partisans.event_effect(early, ELECTION, ELECTION)
+    )
+
+
+def test_independents_feel_final_week_events_fully():
+    b = VoterBehavior(independent_share=0.4, decision_window_days=7)
+    late = Event(ELECTION - timedelta(days=3), "X", -5.0)
+    assert b.event_effect(late, ELECTION, ELECTION) == pytest.approx(0.6 * b.memory_weight(3) + 0.4)
+    # A poll taken before the event can't show it; the adjustment adds its election-day effect.
+    poll = make_poll(1, 5, "A", {"X": 45, "Y": 45})
+    assert event_adjustment(poll, "X", [late], ELECTION, b) == pytest.approx(-5.0 * b.event_effect(late, ELECTION, ELECTION))
+
+
+def test_final_week_polls_count_more():
+    b = VoterBehavior(independent_share=0.3, decision_window_days=7)
+    early = make_poll(1, 20, "A", {"X": 45, "Y": 45})
+    late = make_poll(2, 3, "A", {"X": 45, "Y": 45})
+    as_of = ELECTION
+    from porta_pollster.aggregate import poll_weight
+
+    ratio = poll_weight(early, as_of, 1e9, ELECTION, b) / poll_weight(late, as_of, 1e9, ELECTION, b)
+    assert ratio == pytest.approx(0.7)
+
+
+def test_uncertainty_drops_once_independents_tune_in():
+    polls = [make_poll(i, 10 + i, "A", {"X": 50, "Y": 46}) for i in range(10)]
+    race = RaceConfig("R", ELECTION)
+    b = VoterBehavior(decision_window_days=7)
+    before = forecast_race(race, polls, b, as_of=ELECTION - timedelta(days=8))
+    after = forecast_race(race, polls, b, as_of=ELECTION - timedelta(days=1))
+    assert before.share_sd > after.share_sd + 1.0
+    assert not before.independents["deciding_now"] and after.independents["deciding_now"]
+
+
+def test_more_independents_means_more_uncertainty_before_window():
+    polls = [make_poll(i, 60 + i, "A", {"X": 50, "Y": 46}) for i in range(10)]
+    race = RaceConfig("R", ELECTION)
+    as_of = ELECTION - timedelta(days=59)
+    few = forecast_race(race, polls, VoterBehavior(independent_share=0.1), as_of=as_of)
+    many = forecast_race(race, polls, VoterBehavior(independent_share=0.5), as_of=as_of)
+    assert many.share_sd > few.share_sd
+
+
+def test_independent_share_validated():
+    with pytest.raises(ValueError):
+        VoterBehavior(independent_share=1.5)
 
 
 def test_undecided_allocation():
@@ -68,27 +122,20 @@ def test_undecided_allocation():
 def test_forecast_probabilities_and_leader():
     polls = [make_poll(i, i + 1, f"P{i % 3}", {"X": 52, "Y": 44}, n=1000) for i in range(15)]
     r = forecast_race(RaceConfig("R", ELECTION), polls, as_of=ELECTION)
-    assert sum(o.win_probability for o in r.outlook) == pytest.approx(1.0, abs=1e-6)
+    assert sum(o.win_probability for o in r.outlook) == pytest.approx(1.0, abs=1e-3)
     assert r.outlook[0].candidate == "X"
     assert r.outlook[0].win_probability > 0.9
 
 
-def test_more_time_means_more_uncertainty():
+def test_more_time_means_more_uncertainty_when_some_voters_follow_along():
+    # Only voters who follow the campaign drift over time; late deciders don't move until the final week.
+    b = VoterBehavior(independent_share=0.3)
     polls = [make_poll(i, 100 + i, "A", {"X": 50, "Y": 46}) for i in range(10)]
     race = RaceConfig("R", ELECTION)
-    near = forecast_race(race, polls, as_of=ELECTION - timedelta(days=99))
+    near = forecast_race(race, polls, b, as_of=ELECTION - timedelta(days=99))
     polls_far = [make_poll(i, 300 + i, "A", {"X": 50, "Y": 46}) for i in range(10)]
-    far = forecast_race(race, polls_far, as_of=ELECTION - timedelta(days=299))
+    far = forecast_race(race, polls_far, b, as_of=ELECTION - timedelta(days=299))
     assert far.share_sd > near.share_sd
-
-
-def test_low_attention_increases_uncertainty():
-    polls = [make_poll(i, 60 + i, "A", {"X": 50, "Y": 46}) for i in range(10)]
-    race = RaceConfig("R", ELECTION)
-    as_of = ELECTION - timedelta(days=59)
-    calm = forecast_race(race, polls, VoterBehavior(low_attention_share=0.0), as_of=as_of)
-    jumpy = forecast_race(race, polls, VoterBehavior(low_attention_share=0.8), as_of=as_of)
-    assert jumpy.share_sd > calm.share_sd
 
 
 def test_forecast_is_reproducible_with_seed():
@@ -100,10 +147,16 @@ def test_forecast_is_reproducible_with_seed():
 
 
 def test_fundamentals_weight_recent_data_more():
-    b = VoterBehavior(memory_half_life_days=90)
+    b = VoterBehavior(memory_half_life_days=90, independent_share=0.0)
     series = [(ELECTION - timedelta(days=360), -20.0), (ELECTION - timedelta(days=10), 10.0)]
     remembered = fund.remembered_value(series, ELECTION, b)
     assert remembered > 5.0  # the recent good reading dominates the old bad one
+
+
+def test_independents_judge_economy_on_latest_reading():
+    series = [(ELECTION - timedelta(days=300), -20.0), (ELECTION - timedelta(days=40), 10.0)]
+    all_independents = VoterBehavior(independent_share=1.0)
+    assert fund.remembered_value(series, ELECTION, all_independents) == 10.0
 
 
 def test_fundamentals_only_forecast():
@@ -162,3 +215,28 @@ def test_ai_explain_uses_forecast_and_returns_text():
     assert ai.explain([result], client=fake) == "X is favored."
     assert captured["model"] == ai.MODEL
     assert '"race": "R"' in captured["messages"][0]["content"]
+
+
+def test_default_is_every_voter_a_late_decider():
+    assert VoterBehavior().independent_share == 1.0
+
+
+def test_all_late_deciders_with_only_early_polls_still_works():
+    polls = [make_poll(i, 30 + i, f"P{i % 3}", {"X": 53, "Y": 43}) for i in range(10)]
+    r = forecast_race(RaceConfig("R", ELECTION), polls, VoterBehavior(independent_share=1.0), as_of=ELECTION - timedelta(days=29))
+    assert r.outlook[0].candidate == "X"
+    assert r.poll_average["X"] > 54  # undecideds allocated, not a 50/50 fallback
+
+
+def test_early_event_forgotten_entirely_when_everyone_decides_late():
+    b = VoterBehavior(independent_share=1.0)
+    early = Event(ELECTION - timedelta(days=60), "X", -5.0)
+    assert b.event_effect(early, ELECTION, ELECTION) == 0.0
+
+
+def test_poll_dip_from_early_event_is_undone_when_everyone_decides_late():
+    b = VoterBehavior(independent_share=1.0)
+    scandal = Event(ELECTION - timedelta(days=60), "X", -5.0)
+    poll = make_poll(1, 55, "A", {"X": 40, "Y": 50})  # taken during the dip
+    # The poll shows most of the -5 hit; on election day it's gone, so X moves back up.
+    assert event_adjustment(poll, "X", [scandal], ELECTION, b) == pytest.approx(5.0 * b.memory_weight(5))

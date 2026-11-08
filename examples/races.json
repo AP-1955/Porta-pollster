@@ -2,7 +2,8 @@
   "_note": "SYNTHETIC example. Candidates, polls and events are fictional.",
   "voter_behavior": {
     "memory_half_life_days": 120,
-    "low_attention_share": 0.3,
+    "independent_share": 1.0,
+    "decision_window_days": 7,
     "undecided_allocation": "proportional"
   },
   "races": {

@@ -36,6 +36,7 @@ class ForecastResult:
     n_polls: int
     house_effects: dict[str, dict[str, float]] = field(default_factory=dict)
     remembered_events: list[dict] = field(default_factory=list)
+    independents: dict = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
@@ -136,10 +137,17 @@ def forecast_race(
                 "label": e.label,
                 "candidate": e.candidate,
                 "initial_shift": e.shift,
-                "remembered_on_election_day": round(e.shift * behavior.memory_weight((race.election_date - e.on).days), 2),
+                "partisans_remember": round(e.shift * behavior.memory_weight((race.election_date - e.on).days), 2),
+                "independents_notice": behavior.in_decision_window(e.on, race.election_date),
+                "remembered_on_election_day": round(e.shift * behavior.event_effect(e, race.election_date, race.election_date), 2) + 0.0,
             }
             for e in race.events
         ],
+        independents={
+            "share": behavior.independent_share,
+            "decision_window_days": behavior.decision_window_days,
+            "deciding_now": behavior.independents_deciding(as_of, race.election_date),
+        },
         notes=notes,
     )
 
@@ -172,8 +180,12 @@ def _blend(race: RaceConfig, avg: PollAverage | None, fund_est, w: float, notes:
 
 def _share_sd(avg: PollAverage | None, w: float, days_out: int, behavior: VoterBehavior, settings: ModelSettings) -> float:
     """Total uncertainty on each candidate's share, in points."""
-    drift = behavior.base_daily_drift * math.sqrt(days_out) * (1.0 + behavior.low_attention_share)
-    parts = [drift**2]
+    drift = behavior.base_daily_drift * math.sqrt(days_out) * (1.0 - behavior.independent_share)
+    # Independents haven't chosen until the final window opens, then settle during it.
+    window = behavior.decision_window_days
+    undecided_fraction = 1.0 if days_out >= window else (days_out / window if window > 0 else 0.0)
+    late = behavior.independent_share * behavior.independent_swing_sd * undecided_fraction
+    parts = [drift**2, late**2]
     if avg is not None:
         sampling = 100.0 * math.sqrt(0.25 / max(avg.effective_sample_size, 1.0))
         parts.append((w * math.hypot(sampling, settings.systematic_poll_error_sd)) ** 2)

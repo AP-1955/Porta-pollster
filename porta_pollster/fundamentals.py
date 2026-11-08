@@ -37,12 +37,21 @@ class FundamentalsEstimate:
 
 
 def remembered_value(series: list[tuple[date, float]], election_date: date, behavior: VoterBehavior) -> float | None:
-    """Memory-weighted average of a series as of election day."""
+    """What the electorate as a whole remembers of a series on election day.
+
+    Partisans: memory-weighted average of the whole series.
+    Independents: only conditions when they tune in (readings in the final
+    window, or the latest reading if none fall in it).
+    """
     usable = [(d, v) for d, v in series if d <= election_date]
     if not usable:
         return None
     weights = [behavior.memory_weight((election_date - d).days) for d, _ in usable]
-    return sum(w * v for w, (_, v) in zip(weights, usable)) / sum(weights)
+    partisans = sum(w * v for w, (_, v) in zip(weights, usable)) / sum(weights)
+    window = [v for d, v in usable if behavior.in_decision_window(d, election_date)]
+    independents = sum(window) / len(window) if window else usable[-1][1]
+    s = behavior.independent_share
+    return (1 - s) * partisans + s * independents
 
 
 def estimate(

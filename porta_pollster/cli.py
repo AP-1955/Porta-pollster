@@ -34,10 +34,22 @@ def render(result: ForecastResult) -> str:
         lines.append("\n   Notable pollster leans (corrected for):")
         for p, c, v in sorted(leans, key=lambda x: -abs(x[2])):
             lines.append(f"     {p}: {v:+.1f} for {c}")
+    ind = result.independents
+    if ind:
+        status = "deciding now" if ind["deciding_now"] else "not tuned in yet, so the race is still up for grabs"
+        lines.append(
+            f"\n   Late deciders: {ind['share']:.0%} of voters, decide in the final "
+            f"{ind['decision_window_days']:g} days ({status})"
+        )
     if result.remembered_events:
-        lines.append("\n   Events, and how much voters will still remember on election day:")
+        lines.append("\n   Events, and their effect on election day:")
         for e in result.remembered_events:
-            lines.append(f"     {e['label'] or 'event'} ({e['candidate']}): {e['initial_shift']:+.1f} -> {e['remembered_on_election_day']:+.1f}")
+            who = "inside the final week" if e["independents_notice"] else "before the final week, so late deciders never noticed"
+            detail = who if ind.get("share", 1.0) >= 1.0 else f"engaged voters remember {e['partisans_remember']:+.1f}; {who}"
+            lines.append(
+                f"     {e['label'] or 'event'} ({e['candidate']}): {e['initial_shift']:+.1f} -> "
+                f"{e['remembered_on_election_day']:+.1f}  ({detail})"
+            )
     for n in result.notes:
         lines.append(f"   note: {n}")
     return "\n".join(lines)
@@ -53,6 +65,8 @@ def main(argv: list[str] | None = None) -> int:
     f.add_argument("--race", action="append", help="Only forecast these races (repeatable)")
     f.add_argument("--as-of", type=date.fromisoformat, help="Pretend today is this date (YYYY-MM-DD) for backtesting")
     f.add_argument("--memory-half-life", type=float, help="Override voter memory half-life in days")
+    f.add_argument("--independent-share", type=float, help="Share of voters who only tune in during the final week (0-1, default 1 = everyone)")
+    f.add_argument("--decision-window", type=float, help="Days before the election when independents tune in")
     f.add_argument("--simulations", type=int, default=20000)
     f.add_argument("--json", action="store_true", help="Print machine-readable JSON")
     f.add_argument("--explain", action="store_true", help="Add a plain-English AI briefing (needs Anthropic API access)")
@@ -69,6 +83,15 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.memory_half_life:
         behavior.memory_half_life_days = args.memory_half_life
+    if args.independent_share is not None:
+        behavior.independent_share = args.independent_share
+    if args.decision_window is not None:
+        behavior.decision_window_days = args.decision_window
+    try:
+        behavior.__post_init__()
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 2
     selected = [races[r] for r in args.race] if args.race else list(races.values())
     settings = ModelSettings(simulations=args.simulations)
 
