@@ -1,0 +1,21 @@
+{
+  "_note": "SYNTHETIC example. Candidates, polls and events are fictional.",
+  "voter_behavior": {
+    "memory_half_life_days": 120,
+    "low_attention_share": 0.3,
+    "undecided_allocation": "proportional"
+  },
+  "races": {
+    "Example Senate": {
+      "election_date": "2026-11-03",
+      "incumbent": "Avery Hart",
+      "events": [
+        {"date": "2026-08-05", "candidate": "Avery Hart", "shift": -4.0, "label": "Fictional scandal"}
+      ]
+    },
+    "Example Governor": {
+      "election_date": "2026-11-03",
+      "incumbent": "Dana Price"
+    }
+  }
+}
